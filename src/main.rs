@@ -1,4 +1,5 @@
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
@@ -8,14 +9,34 @@ use axum::{
     routing::get,
     Router, Server,
 };
+use serde::Serialize;
 use sysinfo::{CpuExt, System, SystemExt};
 use tokio::sync::broadcast;
 
-type Snapshot = Vec<f32>;
+macro_rules! read_asset(
+    ($path:literal) => {
+      if cfg!(feature = "dev") {
+        tokio::fs::read_to_string(concat!("assets/", $path)).await.unwrap().to_owned().into()
+      } else {
+        std::borrow::Cow::<'static, str>::from(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path)))
+      }
+    };
+);
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Event {
+    Snapshot { cpus: Vec<f32> },
+}
+
+#[derive(Clone)]
+struct AppState {
+    tx: broadcast::Sender<Event>,
+}
 
 #[tokio::main]
 async fn main() {
-    let (tx, _) = broadcast::channel::<Snapshot>(1);
+    let (tx, _) = broadcast::channel::<Event>(1);
 
     tracing_subscriber::fmt::init();
 
@@ -25,7 +46,7 @@ async fn main() {
         .route("/", get(root_get))
         .route("/index.mjs", get(indexmjs_get))
         .route("/index.css", get(indexcss_get))
-        .route("/realtime/cpus", get(realtime_cpus_get))
+        .route("/events", get(events_get))
         .with_state(app_state.clone());
 
     // Update CPU usage in the background
@@ -34,55 +55,47 @@ async fn main() {
         loop {
             sys.refresh_cpu();
             let v: Vec<_> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
-            let _ = tx.send(v);
+            let _ = tx.send(Event::Snapshot { cpus: v });
             std::thread::sleep(System::MINIMUM_CPU_UPDATE_INTERVAL);
         }
     });
 
     let server = Server::bind(&"0.0.0.0:7032".parse().unwrap()).serve(router.into_make_service());
     let addr = server.local_addr();
-    println!("Listening on {addr}");
+    eprintln!("Listening on http://{addr}");
 
     server.await.unwrap();
 }
 
-#[derive(Clone)]
-struct AppState {
-    tx: broadcast::Sender<Snapshot>,
-}
-
 #[axum::debug_handler]
 async fn root_get() -> impl IntoResponse {
-    let markup = tokio::fs::read_to_string("src/index.html").await.unwrap();
+    let content = read_asset!("index.html");
 
-    Html(markup)
+    Html(content)
 }
 
 #[axum::debug_handler]
 async fn indexmjs_get() -> impl IntoResponse {
-    let markup = tokio::fs::read_to_string("src/index.mjs").await.unwrap();
+    let content = read_asset!("index.mjs");
 
     Response::builder()
         .header("content-type", "application/javascript;charset=utf-8")
-        .body(markup)
+        .body(Body::from(content))
         .unwrap()
 }
 
 #[axum::debug_handler]
 async fn indexcss_get() -> impl IntoResponse {
-    let markup = tokio::fs::read_to_string("src/index.css").await.unwrap();
+    let content = read_asset!("index.css");
 
     Response::builder()
         .header("content-type", "text/css;charset=utf-8")
-        .body(markup)
+        .body(Body::from(content))
         .unwrap()
 }
 
 #[axum::debug_handler]
-async fn realtime_cpus_get(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn events_get(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|ws: WebSocket| async { realtime_cpus_stream(state, ws).await })
 }
 
