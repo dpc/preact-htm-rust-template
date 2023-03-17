@@ -48,8 +48,28 @@ let url = new URL("/events", window.location.href);
 
 url.protocol = url.protocol.replace("http", "ws");
 
-let ws = new WebSocket(url.href);
-ws.onmessage = (ev) => {
-  let event = JSON.parse(ev.data);
-  render(html`<${App} cpus=${event.cpus}></${App}>`, document.body);
-};
+let ws;
+
+function connect_ws() {
+  console.log(`Connecting WS...`);
+  ws = new WebSocket(url.href);
+
+  ws.onopen = (ev) => {
+    console.log(`WS connected`);
+  };
+  ws.onmessage = (ev) => {
+    let event = JSON.parse(ev.data);
+    render(html`<${App} cpus=${event.cpus}></${App}>`, document.body);
+  };
+
+  ws.onclose = () => {
+    const reconnectDelay = 10000 * (Math.random() + 0.5);
+    console.log(`WS is closed. Reconnecting in ${reconnectDelay}ms...`);
+    setTimeout(function() {
+      connect_ws();
+    }, reconnectDelay);
+  };
+}
+
+
+connect_ws();
