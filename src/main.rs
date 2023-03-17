@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use axum::{
     body::Body,
     extract::{
@@ -9,16 +11,18 @@ use axum::{
     routing::get,
     Router, Server,
 };
+use clap::Parser;
 use serde::Serialize;
 use sysinfo::{CpuExt, System, SystemExt};
 use tokio::sync::broadcast;
+use tower_http::compression::CompressionLayer;
 
 macro_rules! read_asset(
     ($path:literal) => {
       if cfg!(feature = "dev") {
-        tokio::fs::read_to_string(concat!("assets/", $path)).await.unwrap().to_owned().into()
+        tokio::fs::read(concat!("assets/", $path)).await.unwrap().to_owned().into()
       } else {
-        std::borrow::Cow::<'static, str>::from(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path)))
+        std::borrow::Cow::<'static, [u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path)).as_slice())
       }
     };
 );
@@ -34,8 +38,15 @@ struct AppState {
     tx: broadcast::Sender<Event>,
 }
 
+#[derive(Parser, Debug)]
+struct Opts {
+    #[arg(long, short, default_value = "[::]:0")]
+    listen: SocketAddr,
+}
 #[tokio::main]
 async fn main() {
+    let opts = Opts::parse();
+
     let (tx, _) = broadcast::channel::<Event>(1);
 
     tracing_subscriber::fmt::init();
@@ -44,10 +55,12 @@ async fn main() {
 
     let router = Router::new()
         .route("/", get(root_get))
+        .route("/favicon.ico", get(favicon_get))
         .route("/index.mjs", get(indexmjs_get))
         .route("/index.css", get(indexcss_get))
         .route("/events", get(events_get))
-        .with_state(app_state.clone());
+        .with_state(app_state.clone())
+        .layer(CompressionLayer::new());
 
     // Update CPU usage in the background
     tokio::task::spawn_blocking(move || {
@@ -60,7 +73,7 @@ async fn main() {
         }
     });
 
-    let server = Server::bind(&"0.0.0.0:7032".parse().unwrap()).serve(router.into_make_service());
+    let server = Server::bind(&opts.listen).serve(router.into_make_service());
     let addr = server.local_addr();
     eprintln!("Listening on http://{addr}");
 
@@ -77,6 +90,16 @@ async fn root_get() -> impl IntoResponse {
 #[axum::debug_handler]
 async fn indexmjs_get() -> impl IntoResponse {
     let content = read_asset!("index.mjs");
+
+    Response::builder()
+        .header("content-type", "application/javascript;charset=utf-8")
+        .body(Body::from(content))
+        .unwrap()
+}
+
+#[axum::debug_handler]
+async fn favicon_get() -> impl IntoResponse {
+    let content = read_asset!("favicon.ico");
 
     Response::builder()
         .header("content-type", "application/javascript;charset=utf-8")
